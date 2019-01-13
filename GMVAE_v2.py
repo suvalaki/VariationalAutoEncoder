@@ -13,6 +13,15 @@ MultivariateNormalDiag = tfp.distributions.MultivariateNormalDiag
 def plog(x):
     return tf.maximum(x, 10e-6)
 
+
+def multivariate_normal_pdf(distribution, tensor):
+    
+    prob = tf.map_fn(lambda x: tf.map_fn( lambda y: distribution.log_prob(y), x ), tensor )
+    
+    return prob
+    
+
+
 class GMVAE():
     
     # https://arxiv.org/pdf/1611.05148.pdf
@@ -22,21 +31,30 @@ class GMVAE():
         #number of batches to pass to the optimiser
         self.B = 200
         # Number of Monte Carlo Samples
-        self.L = 50
+        self.L = 1
         # Number of dimensions of X
         self.D = 784
         # Number of clusters
-        self.K = 10
+        self.K = 3
         # Encoding Layers dimensions
         self.encoding_dims = [500, 100]
         # activation functions for encoding layers
         self.encoding_act = [tf.nn.relu, tf.nn.relu] 
         # Latent Dimension. dimension of mu_c, var_c, mu_tilde and var_tilde
-        self.J = 64
+        self.J = 2
+
+
+        #
+        self.scale_prior = 10
 
         # division max opperator
         self.small_value = 10e-6
         self.div_prot = lambda x: tf.maximum(x, self.small_value)
+        
+        
+        # Prevent training until after entropy
+        self.lambda_1 = -100
+        self.lambda_2 = 20
         
         pass
     
@@ -58,7 +76,7 @@ class GMVAE():
         
         self.numerator_c = self.p_c_pz
         self.denominator = tf.reduce_sum(self.p_c_pz, axis = 0)
-        return (1/self.L *  tf.reduce_mean( self.numerator_c / 
+        return (  tf.reduce_mean( self.numerator_c / 
                         self.div_prot(self.denominator[None,:,:]),
                                          axis = 1 )   )
         
@@ -103,18 +121,31 @@ class GMVAE():
                 var = tf.exp(log_var, name = 'var')
                 scale = tf.sqrt(var, name = "scale")
                 
-                z_distribution = MultivariateNormalDiag(mu, scale)
+                #z_distribution = MultivariateNormalDiag(mu, scale)
+                #z = z_distribution.sample(self.L)
                 
-                z = z_distribution.sample(self.L)
+                # Since the Monte Carlo estimate of the expectation above is 
+                # non-differentiable w.r.t φ when z(l) is directly sampled 
+                # from z ∼ N (µ˜,σ˜2I), we use the reparameterization trick to 
+                # obtain a differentiable estimation:
+                epsilon = MultivariateNormalDiag([0] * self.J, scale_diag = [1] * self.J)
+                epsilon_sample = epsilon.sample(self.L)
+                z = mu[None,:,:] + scale[None,:,:] * epsilon_sample[:,None,:]
                 
-                q_zgx = tf.map_fn(z_distribution.log_prob, z)
                 
                 
-                p_z = [tf.exp(tf.map_fn(
-                        self.z_prior_distribution[k].log_prob, z)) 
+                
+                q_zgx = tf.map_fn(epsilon.prob, epsilon_sample)
+                #q_zgx = multivariate_normal_pdf(z_distribution, z)
+                
+                p_z = [tf.map_fn(
+                        self.z_prior_distribution[k].prob, z) 
                         for k in range(self.K)]
                 p_c_pz = tf.convert_to_tensor(
                         [ self.p_c[k] * p_z[k] for k in range(self.K)])
+                
+                self.pc_temp =  self.p_c
+                
                 p_z = tf.convert_to_tensor(p_z)
                 
                 #p_z = z.
@@ -153,17 +184,17 @@ class GMVAE():
         with tf.variable_scope("priors"):
         
             # Prior probability of cluster c. P(c|pi)
-            self.p_c = tf.convert_to_tensor([1/self.K] * self.K )
+            self.p_c = tf.Variable(tf.convert_to_tensor([1/self.K] * self.K ), trainable=False)
             # Prior mean for latent centroids. Initialised at zero for all clusters
-            self.z_mu_prior = tf.convert_to_tensor([ [0.0] * self.J ] * self.K)
+            self.z_mu_prior = tf.Variable(tf.zeros(shape=(self.K,self.J)), trainable=False)
             # Prior variance for latent centroids. Initialised at 1
-            self.z_var_prior = tf.convert_to_tensor([ [1.0] * self.J ] * self.K)
-            self.z_scale_prior = tf.sqrt(self.z_var_prior)
+            self.z_var_prior = tf.Variable(self.scale_prior * tf.ones(shape=(self.K,self.J)), trainable=False)
+            self.z_scale_prior = tf.Variable(tf.sqrt(self.z_var_prior), trainable=False)
             # note scale = sd
             self.z_prior_distribution = [
                     MultivariateNormalDiag(
                             loc=self.z_mu_prior[k,:], 
-                            scale_diag=tf.sqrt(self.z_scale_prior[k,:])  
+                            scale_diag=tf.sqrt(self.z_scale_prior[k,:]),  
                     ) for k in range(self.K)]
                 
         self.inputs = tf.cast(
@@ -184,6 +215,8 @@ class GMVAE():
         #log_p_zgc = [self.z_prior_distribution.log_prob[k](z_tilde)
         # probabilities
         self.q_cgx = self._graph_q_cgx()
+        self.q_cgx_t = tf.transpose(self.q_cgx)
+        self.cgx = tf.nn.softmax(tf.transpose(self.q_cgx))
         
         with tf.variable_scope('loss'):
         
@@ -191,10 +224,13 @@ class GMVAE():
             self.loss_z = self.z_loss()
             self.loss_cat = self.cat_loss()
             
-            self.loss = tf.reduce_mean(self.loss_xent 
-                                       + self.loss_z + self.loss_cat)
+            self.loss_xent_sum = tf.reduce_mean(self.xent())
+            self.loss_z_sum = tf.reduce_mean(self.z_loss())
+            self.loss_cat_sum = tf.reduce_mean(self.cat_loss())
             
-        self.minimizer = tf.train.AdamOptimizer().minimize(self.loss)
+        self.cost  = self.loss_xent_sum + self.loss_z_sum + self.loss_cat_sum
+            
+        self.minimizer = tf.train.AdamOptimizer().minimize(self.cost )
         init = tf.global_variables_initializer()
         self.sess = tf.Session()
         self.sess.run(init)
@@ -226,7 +262,7 @@ class GMVAE():
             
             q_cgx = tf.transpose(self.q_cgx, (1,0))
             
-            integrad = (tf.log(v_p) +v_t / self.div_prot(v_p) 
+            integrad = (tf.log(v_p) + v_t / self.div_prot(v_p) 
                             + tf.square(mu_t - mu_p) / self.div_prot(v_p))
             
             # outer reduction is for batches
@@ -237,7 +273,7 @@ class GMVAE():
     def cat_loss(self):
                 
         return (tf.reduce_sum(self.q_cgx * plog( self.p_c[:,None] / self.div_prot(self.q_cgx) ), 0)
-                + tf.reduce_sum( (1+plog(self.var_tilde)) , 1) )
+                + 0.5 * tf.reduce_sum( (1+plog(self.var_tilde)) , 1) )
         
     def train(self, mnist, epoch_size, n_batch):
         for epoch in range(epoch_size):
@@ -245,14 +281,20 @@ class GMVAE():
             self.sess.run(self.minimizer, feed_dict={'x:0': mnist.train.next_batch(n_batch)[0]})
         
             if (epoch + 1) % 100 == 0:
-                loss_val = self.sess.run(self.loss, 
-                            feed_dict={'x:0': mnist.train.next_batch(n_batch)[0]})
-                print(f" epoch {epoch+1}/{epoch_size} : loss = {loss_val:.3f}")
+                loss_val, loss_xent_val, loss_z_val, loss_cat_val = (
+                    self.sess.run(
+                        [self.cost, self.loss_xent_sum, self.loss_z_sum,self.loss_cat_sum], 
+                        feed_dict={'x:0': mnist.train.next_batch(n_batch)[0]}))
+                print(f" epoch {epoch+1}/{epoch_size} : loss = {loss_val:.3f} " 
+                    f"xent = {loss_xent_val:.3f} zloss = {loss_z_val:.3f} closs = {loss_cat_val:.3f}")
 
 
-
+from tensorflow.examples.tutorials.mnist import input_data
+mnist = input_data.read_data_sets("MNIST_data", one_hot=True)
 model = GMVAE()
 model._build()
+
+"""
 model.z_tilde
 model.mu_tilde
 
@@ -265,17 +307,41 @@ model.loss_xent
 
 model.loss_cat
 
-from tensorflow.examples.tutorials.mnist import input_data
-mnist = input_data.read_data_sets("MNIST_data", one_hot=True)
+model.sess.run(model.minimizer, feed_dict={'x:0': mnist.train.next_batch(10000)[0]})
 
-model.sess.run(model.z_tilde, 
-               feed_dict={'x:0': mnist.train.next_batch(1000)[0]})
+mu_tilde
+var_tilde
+z_tilde
+q_zgx
+
+q_cgx
+q_cgx_t
+p_z
+
+cost
+loss_xent
+loss_cat_sum
+self.loss_z_sum
+
+model.sess.run([model.cost,model.loss_xent_sum, model.loss_z_sum, model.loss_cat_sum], 
+               feed_dict={'x:0': mnist.train.next_batch(10)[0]})
+
+model.sess.run(model.q_cgx, 
+               feed_dict={'x:0': mnist.train.next_batch(10)[0]})
+
+model.sess.run(model.var_tilde, 
+               feed_dict={'x:0': mnist.train.next_batch(10)[0]})
+
+model.sess.run(model.p_z, 
+               feed_dict={'x:0': mnist.train.next_batch(10)[0]})
 
 [n.name for n in tf.get_default_graph().as_graph_def().node][1:600]
 
 model.sess.run(model.loss_z, 
                feed_dict={'x:0': mnist.train.next_batch(1000)[0]})
 
-model.train( mnist, epoch_size=100, n_batch=100)
+"""
+
+model.train( mnist, epoch_size=10, n_batch=1000)
 
        
