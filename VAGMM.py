@@ -85,7 +85,7 @@ def graph_Qzygx(
 		with tf.variable_scope('y_one_hot'):
 			y  = [None] * k
 			for i in range(k):
-				y[i] = tf.add(y_, Constant(np.eye(k)[i], name=f'hot_at_{i}'))
+				y[i] = tf.add(y_, tf.Constant(np.eye(k)[i], name=f'hot_at_{i}'))
 
 		# propose distribution over y
 		qy_logit, qy = graph_Qygx(
@@ -171,28 +171,48 @@ def graph_build(
 	output_dim = 784
 	):
 
-	x = tf.placeholder((None, output_dim), tf.float32)
+	with tf.Graph().as_default() as graph:
+		x = tf.placeholder(tf.float32, (None, output_dim))
 
-	xb, y, qy_logit, qy, z_k, qzgxy_k, log_qzgxy_k = graph_Qzygx(
-		x, y_k_encode_layer_dims, y_k_encode_layer_acti, y_k_categorical_dims, 
-		z_k_encode_layer_dims, z_k_encode_layer_acti,z_k_latent_dims)
+		# Encoder
+		xb, y, qy_logit, qy, z_k, qzgxy_k, log_qzgxy_k = graph_Qzygx(
+			x, y_k_encode_layer_dims, y_k_encode_layer_acti, y_k_categorical_dims, 
+			z_k_encode_layer_dims, z_k_encode_layer_acti,z_k_latent_dims)
 
-	prior_y_pi = tf.constant(1/y_k_categorical_dims)
+		with tf.variable_scope('Pzgy'):
+			(prior_z_mu_k, prior_z_var_k, 
+			prior_pz_kgy_k, log_pz_kgy_k) = [[None] * y_k_categorical_dims 
+											for i in range(4)]
+			for i in range(y_k_categorical_dims):
+				(prior_z_mu_k[i], prior_z_var_k[i], 
+				prior_pz_kgy_k[i], log_pz_kgy_k[i]) = graph_Pz_kgy_k(
+					y[i], z_k[i], z_k_latent_dims)
 
-	with tf.variable_scope('Pzgy'):
-		(prior_z_mu_k, prior_z_var_k, 
-		prior_pz_kgy_k, log_pz_kgy_k) = [[None] * y_k_categorical_dims 
-										for i in range(4)]
-		for i in range(y_k_categorical_dims):
-			(prior_z_mu_k[i], prior_z_var_k[i], 
-			prior_pz_kgy_k[i], log_pz_kgy_k[i]) = graph_Pz_kgy_k(
-				y[i], z_k[i], z_k_latent_dims)
+		# Priors
+		prior_y_pi = tf.constant(1/y_k_categorical_dims)
 
-	px_logit, px = graph_Px_g_z(
-		z_k, z_k_encode_layer_dims, z_k_encode_layer_acti, output_dim)
+		px_logit, px = graph_Px_g_z(
+			z_k, z_k_encode_layer_dims, z_k_encode_layer_acti, output_dim)
 
-	output = tf.cast(
-		tf.greater(px, tf.random_uniform(tf.shape(px), 0, 1)), tf.float32)
+		# Binerised Output
+		output = tf.cast(
+			tf.greater(px, tf.random_uniform(tf.shape(px), 0, 1)), tf.float32)
+
+		# Loss
+		vaeloss = loss(py=prior_y_pi, pzgy=prior_pz_kgy_k, 
+			pxgyz=px, qygx=qy, qzgxy=qzgxy_k)
+
+		# Minimizer
+		minimizer = tf.train.AdamOptimizer().minimize(vaeloss)
+
+
+		# Create tensorflow session and initilize
+		init = tf.global_variables_initializer()
+		sess = tf.Session(graph=graph)
+		sess.run(init)
+
+		return sess
+
 
 
 
