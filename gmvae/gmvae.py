@@ -127,6 +127,9 @@ class GMVAE():
         # set random seed
         if random_state is not None:
             tf.random.set_random_seed(random_state)
+
+
+        # create dataset iterator...?
             
         # Input Placeholder
         x = tf.placeholder(dtype=tf.float32, shape=(None, input_dim), name='x')
@@ -200,12 +203,60 @@ class GMVAE():
 
         return self
 
+    @staticmethod
+    def iterator_results_run(iterator_dict, session, target, agg_func):
+
+        # initialise the itterator_dict
+        # Note iterators should be same length
+        next_element_dict = {}                                 
+        for key in iterator_dict.keys():
+            iterator = iterator_dict[key]
+            iterator = iterator.make_one_shot_iterator()
+            next_element_dict[key] = iterator.get_next()
+
+        # Run over all the data
+        result = []
+        while True:
+            try:
+                # Get the data as a dict
+                iterator_values = {}
+                for key in iterator_dict.keys():
+                    iterator_values[key] = session.run(next_element_dict[key])[0]
+
+                # Train over all data
+                if agg_func is not None:
+                    result.append(session.run(target, feed_dict=iterator_values))
+                else:
+                    session.run(target, feed_dict=iterator_values)
+            except tf.errors.OutOfRangeError:
+                break
+
+        # Aggregate results
+        if agg_func is not None:
+            if type(target) == list: 
+                result_output = []
+                for i in range(len(target)):
+                    result_output[i] = agg_func(result[i])
+            else:
+                result = agg_func(result)
+            return result_output
+
+
+        
     
     def validation_acc(self, X, labels):
         """
         Find the 
+43
+        X is an itterator
         """
-        logits = self.sess.run(self.var_qy_logit, feed_dict={'x:0': X})
+        #logits = self.sess.run(self.var_qy_logit, feed_dict={'x:0': X})
+        logits = self.iterator_results_run(
+            iterator_dict = {'x:0': X}, 
+            session = self.sess, 
+            target = self.var_qy_logit, 
+            agg_func = lambda x: x )
+        )
         cat_pred = logits.argmax(1)
         real_pred = np.zeros_like(cat_pred)
         for cat in range(logits.shape[1]):
@@ -216,7 +267,8 @@ class GMVAE():
             real_pred[cat_pred == cat] = mode(lab).mode[0] # most common  value in array
         return np.mean(real_pred == labels.argmax(1))
 
-    def fit(self, X_train, subsample=None, epochs=1, iterep=1, y_train=None, X_test=None, y_test=None, subsample_test=None):
+    def fit(self, X_train, batch_size = 100, subsample=None, epochs=1, iterep=1, 
+            y_train=None, X_test=None, y_test=None, subsample_test=None):
         """
         Fits trains the model for the given number of epochs and itterations
         """
@@ -227,6 +279,38 @@ class GMVAE():
             else:
                 return s
 
+
+        # turn the dataset into a tensorflow.data.Dataset
+        # https://www.tensorflow.org/guide/datasets#consuming_values_from_an_iterator
+        dataset_X_train = tf.data.Dataset.from_tensor_slices(X_train)
+        batched_dataset_X_train = dataset_X_train.batch(1000)
+        iterator_X_train = batched_dataset_X_train.make_one_shot_iterator()
+        next_element_X_train = iterator_X_train.get_next()
+
+        if X_train is not None and y_train is not None:
+            dataset_train = tf.data.Dataset.from_tensor_slices((X_train, y_train))
+            batched_dataset_train = dataset_train.batch(batch_size)
+            iterator_train = batched_dataset_train.make_one_shot_iterator()
+            next_element_train = iterator_train.get_next()
+
+        if X_test is not None:
+            dataset_X_test = tf.data.Dataset.from_tensor_slices(X_test)
+            batched_dataset_X_test = dataset_X_test.batch(batch_size)
+            iterator_X_test = batched_dataset_X_test.make_one_shot_iterator()
+            next_element_X_test = iterator_X_test.get_next()
+
+        if X_test is not None and y_train is not None:
+            dataset_test = tf.data.Dataset.from_tensor_slices((X_test, y_test))
+            batched_dataset_test = dataset_test.batch(batch_size)
+            iterator_test = batched_dataset_test.make_one_shot_iterator()
+            next_element_test = iterator_test.get_next()
+
+        dataset_train = tf.data.Dataset.from_tensor_slices((X_train, y_train)) if y_train is not None else None
+        dataset_X_test = tf.data.Dataset.from_tensor_slices(X_test) if X_test is not None else None
+        dataset_test = tf.data.Dataset.from_tensor_slices((X_test,y_test)) if (X_test is not None and y_test is not None) else None
+
+
+        # Get session params
         (sess, qy_logit, nent, loss, train_step) = self.sess_info
         idxs = list(range(X_train.shape[0]))
 
@@ -255,17 +339,34 @@ class GMVAE():
                 idx_test = idxs_x_test
 
             # run the training step
-            sess.run(train_step, feed_dict={'x:0': X_train[idx]})
+
+            # init the iterator because is destroyed after use
+            self.iterator_results_run(
+                iterator_dict = {'x:0': batched_dataset_train}, 
+                session = sess, 
+                target = train_step, 434343
+                agg_func = None )
+
+            print('this far')
 
             # print out metrics
             if (i + 1) %  iterep == 0:
 
                 train_ent, train_loss, train_acc, test_ent, test_loss, test_acc = [None for i in range(6)] 
 
-                train_ent, train_loss = sess.run([self.var_nent, self.var_loss], feed_dict={'x:0': X_train[idx]})
+                #train_ent, train_loss = sess.run([self.var_nent, self.var_loss], feed_dict={'x:0': X_train[idx]})
+
+                # caclulate entropy
+                train_ent, train_loss = self.iterator_results_run(
+                    iterator_dict = {'x:0': next_element_X_train}, 
+                    session = sess, 
+                    target = [self.var_nent, self.var_loss], 
+                    agg_func = lambda x: np.sum(np.array(x), axis=0) )
+
                 train_ent, train_loss = -train_ent.mean(), train_loss.mean()
 
                 if y_train is not None:
+                    #train_acc = self.validation_acc(X_train[idx], y_train[idx])
                     train_acc = self.validation_acc(X_train[idx], y_train[idx])
                 else:
                     train_acc = 0.0
@@ -288,7 +389,6 @@ class GMVAE():
                     print(string)
 
                 it = int(floor((i + 1) / iterep))
-                print(type(it))
                 string = ('{:10.2e},{:10.2e},{:10.2e},{:10.2e},{:10.2e},{:10.2e},{:10d}'
                         .format(
                             train_ent, train_loss, train_acc, 
@@ -296,3 +396,7 @@ class GMVAE():
                             it
                         ))
                 print(string)
+
+    def predict(self, att, X):
+        return self.sess.run(att, feed_dict={'x:0':X})
+    
