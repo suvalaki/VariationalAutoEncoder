@@ -10,6 +10,9 @@ pandas = "*"
 edward = "*"
 tensorflow-probability = "*"
 spyder = "*"
+sklearn = "*"
+tensorflow-gpu = "*"
+shap = "*"
 
 [dev-packages]
 
