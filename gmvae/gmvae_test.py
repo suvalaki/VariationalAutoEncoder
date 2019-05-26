@@ -78,7 +78,7 @@ model = GMVAE(
     components=10, 
     kind='binary', 
     random_state=rand_state
-    )
+)
 
 model.build()
 

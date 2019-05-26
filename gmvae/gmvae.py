@@ -6,7 +6,7 @@ from scipy.stats import mode
 from tensorflow.nn import softmax_cross_entropy_with_logits_v2 as cross_entropy_with_logits
 
 def gaussian_sample(mean, var, scope=None):
-    #Permit sampling from a gaussin distribution
+    # Sampling from a gaussin distribution
     with tf.variable_scope(scope, 'gaussian_sample'):
         sample = tf.random_normal(tf.shape(mean), mean, tf.sqrt(var))
         sample.set_shape(mean.get_shape())
@@ -255,7 +255,7 @@ class GMVAE():
             iterator_dict = {'x:0': X}, 
             session = self.sess, 
             target = self.var_qy_logit, 
-            agg_func = lambda x: x )
+            agg_func = lambda x: x 
         )
         cat_pred = logits.argmax(1)
         real_pred = np.zeros_like(cat_pred)
@@ -344,7 +344,7 @@ class GMVAE():
             self.iterator_results_run(
                 iterator_dict = {'x:0': batched_dataset_train}, 
                 session = sess, 
-                target = train_step, 434343
+                target = train_step, 
                 agg_func = None )
 
             print('this far')
